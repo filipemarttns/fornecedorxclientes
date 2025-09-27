@@ -38,7 +38,7 @@ async function promptUserForMultiplier() {
     return new Promise((resolve) => {
         function ask() {
             rl.question(
-                '\nEscolha uma opção para os valores de R$:\n1. Triplicar (multiplicar por 3)\n2. Duplicar (multiplicar por 2)\nDigite 1 ou 2: ',
+                '\nOlá, Júnior! Por favor escolha uma opção para os valores de R$:\n1. Triplicar (multiplicar por 3)\n2. Duplicar (multiplicar por 2)\nDigite 1 ou 2: ',
                 (answer) => {
                     const choice = parseInt(answer.trim(), 10);
                     if (choice === 1) {
@@ -142,6 +142,14 @@ async function promptUserForMultiplier() {
         }
 
         logger.debug(`[DEBUG] Mensagem recebida. Tipo: ${message.type}, De: ${message.from}, Corpo: ${message.body.substring(0, 50)}...`);
+
+        // --- NEW LOGIC: Filter messages based on keywords ---
+        const messageBodyLower = message.body.toLowerCase();
+        if (messageBodyLower.includes('multimarcas') || messageBodyLower.includes('bom dia')) {
+            logger.info(`[FILTRO] Mensagem ignorada devido a palavra-chave proibida: "${message.body.substring(0, 50)}..."`);
+            return;
+        }
+        // --- END NEW LOGIC ---
 
         // Only process incoming messages from the identified Announcement Groups
         if (!sourceGroupIds.includes(message.from) || message.fromMe) {
