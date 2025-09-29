@@ -26,6 +26,12 @@ function findChromePath() {
 
 // Configuration
 const SOURCE_COMMUNITY_NAMES = (process.env.SOURCE_COMMUNITY_NAMES || "").split(',').map(name => name.trim()).filter(n => n);
+// Permite lista explícita de canais de anúncio (separados por vírgula)
+const ANNOUNCEMENT_GROUP_NAMES = (process.env.ANNOUNCEMENT_GROUP_NAMES || process.env.ANNOUNCEMENT_GROUP_NAME || "")
+  .split(',')
+  .map(name => name.trim())
+  .filter(n => n);
+// Nome padrão para o canal da comunidade (comportamento típico do WhatsApp): "Avisos"
 const ANNOUNCEMENT_GROUP_NAME = process.env.ANNOUNCEMENT_GROUP_NAME || "Avisos";
 const TARGET_GROUP_NAME = process.env.TARGET_GROUP_NAME || "OJ® Streetwear Shop & Sneakers";
 const DEDUPE_WINDOW_SECONDS = parseInt(process.env.DEDUPE_WINDOW_SECONDS || "10", 10);
@@ -34,6 +40,17 @@ const LOG_PATH = process.env.LOG_PATH || './wh_relay.log';
 const HEADLESS = process.env.HEADLESS === 'true' || process.env.HEADLESS === true; // Usar .env para controlar headless
 
 let GLOBAL_PRICE_MULTIPLIER = parseInt(process.env.GLOBAL_PRICE_MULTIPLIER) || 3; // Usar .env ou default 3
+
+// Normalização e listas de filtro (escopo global)
+function normalize(str) {
+    return (str || '').toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '');
+}
+const communityWanted = SOURCE_COMMUNITY_NAMES.map(normalize);
+const defaultAnnouncementNames = [normalize(ANNOUNCEMENT_GROUP_NAME), 'anuncios', 'anúncios', 'announcements'];
+const announcementWanted = (ANNOUNCEMENT_GROUP_NAMES.length > 0
+    ? ANNOUNCEMENT_GROUP_NAMES
+    : [ANNOUNCEMENT_GROUP_NAME]
+).map(normalize).concat(defaultAnnouncementNames);
 
 // Initialize logger
 const logger = pino(
@@ -108,19 +125,39 @@ const logger = pino(
         const allChatsDetails = chats.map(chat => JSON.parse(JSON.stringify(chat))); // Deep copy to get all properties
         logger.debug(`[DEBUG] Detalhes completos de TODOS os chats encontrados: ${JSON.stringify(allChatsDetails, null, 2)}`);
 
-        // --- NEW LOGIC: Find Announcement Groups within specified Communities ---
-        sourceGroups = chats.filter(chat =>
-            chat.isGroup &&
-            SOURCE_COMMUNITY_NAMES.includes(chat.name) &&
-            chat.groupMetadata && chat.groupMetadata.announce === true
-        );
+        // --- NEW LOGIC (revisado): Encontrar Canais de Aviso ---
+        // Regras:
+        // 1) Se ANNOUNCEMENT_GROUP_NAMES estiver definido, casar por igualdade OU "contém" (case-insensitive)
+        // 2) Caso contrário, usar SOURCE_COMMUNITY_NAMES como filtro por "contém" (case-insensitive) nos nomes dos canais com announce=true
+        // 3) Se nada for definido, monitorar TODOS os canais com announce=true (com aviso no log)
 
-        logger.debug(`[DEBUG] Grupos de Avisos identificados diretamente pelos nomes e flag 'announce': ${JSON.stringify(sourceGroups.map(g => ({ id: g.id._serialized, name: g.name, isGroup: g.isGroup, announce: g.groupMetadata ? g.groupMetadata.announce : false })), null, 2)}`);
+        const announcedChats = chats.filter(chat => chat.isGroup && chat.groupMetadata && chat.groupMetadata.announce === true);
+        logger.info(`[ANNOUNCE] Canais com announce=true encontrados: [${announcedChats.map(c => c.name).join(', ')}]`);
+        logger.info(`[ANNOUNCE] communityWanted: [${communityWanted.join(', ')}]; announcementWanted: [${announcementWanted.join(', ')}]`);
+
+        if (communityWanted.length > 0 || announcementWanted.length > 0) {
+            sourceGroups = announcedChats.filter(chat => {
+                const nameN = normalize(chat.name);
+                const matchesCommunity = communityWanted.length > 0 && communityWanted.some(w => nameN.includes(w) || nameN === w);
+                const matchesAnnouncementName = announcementWanted.some(w => w && (nameN === w || nameN.includes(w)));
+                const accepted = matchesCommunity || matchesAnnouncementName;
+                logger.debug(`[ANNOUNCE_MATCH] name="${chat.name}" announce=true matchesCommunity=${matchesCommunity} matchesAnnouncementName=${matchesAnnouncementName} accepted=${accepted}`);
+                return accepted;
+            });
+        } else {
+            // Fallback: monitora todos os canais de anúncio encontrados
+            sourceGroups = announcedChats;
+            logger.warn('Nenhum filtro de nomes fornecido. Monitorando TODOS os canais de anúncio encontrados.');
+        }
+
+        logger.debug(`[DEBUG] Grupos de Avisos identificados (announce=true, com matching flexível): ${JSON.stringify(sourceGroups.map(g => ({ id: g.id._serialized, name: g.name, isGroup: g.isGroup, announce: g.groupMetadata ? g.groupMetadata.announce : false })), null, 2)}`);
 
         sourceGroupIds = sourceGroups.map(group => group.id._serialized);
 
         if (sourceGroups.length === 0) {
-            logger.error(`Nenhum Grupo de Avisos foi encontrado com os nomes: "${SOURCE_COMMUNITY_NAMES.join(', ')}". Certifique-se de que os nomes correspondem exatamente aos canais de aviso das comunidades e que a flag 'announce' está presente.`);
+            logger.error(`Nenhum Canal de Avisos encontrado de acordo com os filtros.
+Filtros usados -> ANNOUNCEMENT_GROUP_NAMES: [${ANNOUNCEMENT_GROUP_NAMES.join(', ')}]; SOURCE_COMMUNITY_NAMES: [${SOURCE_COMMUNITY_NAMES.join(', ')}].
+Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe vazio para monitorar todos os canais com announce=true.`);
             process.exit(1);
         }
 
@@ -133,7 +170,7 @@ const logger = pino(
             process.exit(1);
         }
 
-        logger.info(`Monitorando Grupos de Avisos: "${sourceGroups.map(g => g.name).join(', ')}"`);
+        logger.info(`Monitorando Canais de Aviso: "${sourceGroups.map(g => g.name).join(', ')}"`);
         logger.info(`Encaminhando para o grupo: "${targetGroup.name} (${targetGroup.id._serialized})"`);
 
         isReadyToProcessMessages = true; // Bot está pronto para processar mensagens
@@ -150,8 +187,8 @@ const logger = pino(
 
         // --- NEW LOGIC: Filter messages based on keywords ---
         const messageBodyLower = message.body.toLowerCase();
-        if (messageBodyLower.includes('multimarcas') || messageBodyLower.includes('bom dia')) {
-            logger.info(`[FILTRO] Mensagem ignorada devido a palavra-chave proibida: "${message.body.substring(0, 50)}..."`);
+        if (messageBodyLower.includes('bom dia')) {
+            logger.info(`[FILTRO] Mensagem ignorada devido se de bom dia: "${message.body.substring(0, 50)}..."`);
             return;
         }
         // --- END NEW LOGIC ---
