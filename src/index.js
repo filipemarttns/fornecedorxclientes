@@ -3,8 +3,26 @@ const qrcode = require('qrcode-terminal');
 const pino = require('pino');
 const path = require('path');
 const fs = require('fs');
-const readline = require('readline');
+const { execSync } = require('child_process');
 require('dotenv').config(); // Load environment variables from .env file
+
+// Função para encontrar o Chrome no sistema
+function findChromePath() {
+    const possiblePaths = [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Users\\' + process.env.USERNAME + '\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Users\\' + process.env.USERNAME + '\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe'
+    ];
+    
+    for (const chromePath of possiblePaths) {
+        if (fs.existsSync(chromePath)) {
+            return chromePath;
+        }
+    }
+    
+    return undefined;
+}
 
 // Configuration
 const SOURCE_COMMUNITY_NAMES = (process.env.SOURCE_COMMUNITY_NAMES || "").split(',').map(name => name.trim()).filter(n => n);
@@ -13,9 +31,9 @@ const TARGET_GROUP_NAME = process.env.TARGET_GROUP_NAME || "OJ® Streetwear Shop
 const DEDUPE_WINDOW_SECONDS = parseInt(process.env.DEDUPE_WINDOW_SECONDS || "10", 10);
 const MEDIA_SEND_DELAY_MS = parseInt(process.env.MEDIA_SEND_DELAY_MS || "20000", 10); // Reintroduced and set default to 20 seconds
 const LOG_PATH = process.env.LOG_PATH || './wh_relay.log';
-const HEADLESS = true; // Forçar o modo headless para que não abra a janela do navegador.
+const HEADLESS = process.env.HEADLESS === 'true' || process.env.HEADLESS === true; // Usar .env para controlar headless
 
-let GLOBAL_PRICE_MULTIPLIER = 3; // Default to 3, but will be set by user input
+let GLOBAL_PRICE_MULTIPLIER = parseInt(process.env.GLOBAL_PRICE_MULTIPLIER) || 3; // Usar .env ou default 3
 
 // Initialize logger
 const logger = pino(
@@ -29,39 +47,13 @@ const logger = pino(
   })
 );
 
-async function promptUserForMultiplier() {
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-    });
-
-    return new Promise((resolve) => {
-        function ask() {
-            rl.question(
-                '\nOlá, Júnior! Por favor escolha uma opção para os valores de R$:\n1. Triplicar (multiplicar por 3)\n2. Duplicar (multiplicar por 2)\nDigite 1 ou 2: ',
-                (answer) => {
-                    const choice = parseInt(answer.trim(), 10);
-                    if (choice === 1) {
-                        rl.close();
-                        resolve(3);
-                    } else if (choice === 2) {
-                        rl.close();
-                        resolve(2);
-                    } else {
-                        console.log('Opção inválida. Por favor, digite 1 ou 2.');
-                        ask(); // Ask again
-                    }
-                }
-            );
-        }
-        ask();
-    });
-}
+// Função removida - agora usa apenas o .env
 
 (async () => {
     logger.info('Starting WhatsApp Forwarder Bot...');
-    GLOBAL_PRICE_MULTIPLIER = await promptUserForMultiplier();
-    console.log(`[DEBUG] Multiplicador de preço escolhido: ${GLOBAL_PRICE_MULTIPLIER}`);
+    
+    // Usar sempre o valor do .env (não fazer pergunta)
+    console.log(`[DEBUG] Multiplicador de preço configurado: ${GLOBAL_PRICE_MULTIPLIER}`);
 
     logger.info(`Source Communities: "${SOURCE_COMMUNITY_NAMES.join(', ')}"`); // Log communities
     logger.info(`Announcement Group Name: "${ANNOUNCEMENT_GROUP_NAME}"`); // Log announcement group name
@@ -71,11 +63,20 @@ async function promptUserForMultiplier() {
     logger.info(`Log Path: "${LOG_PATH}"`);
     logger.info(`Headless Mode: ${HEADLESS}`);
 
+    // Encontrar o Chrome no sistema
+    const chromePath = findChromePath();
+    if (chromePath) {
+        console.log(`[DEBUG] Chrome encontrado em: ${chromePath}`);
+    } else {
+        console.log('[DEBUG] Chrome não encontrado, usando Chromium embutido');
+    }
+
     const client = new Client({
         authStrategy: new LocalAuth({ clientId: 'whatsapp-forwarder' }),
         puppeteer: {
             headless: HEADLESS,
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+            executablePath: chromePath || undefined, // Usar Chrome do sistema se disponível
         }
     });
 
@@ -86,11 +87,15 @@ async function promptUserForMultiplier() {
     const forwardedMessages = new Map(); // Map to store forwarded message hashes/IDs and their timestamps
 
     client.on('qr', (qr) => {
+        console.log('\n=== QR CODE PARA AUTENTICAÇÃO ===');
         qrcode.generate(qr, { small: true });
+        console.log('=== ESCANEIE O QR CODE ACIMA COM SEU WHATSAPP ===\n');
         logger.info('QR RECEIVED. Scan with your WhatsApp app.');
     });
 
     client.on('ready', async () => {
+        console.log('\n✅ WhatsApp conectado com sucesso!');
+        console.log('🤖 Bot iniciado e monitorando grupos...\n');
         logger.info('Client is ready!');
 
         const chats = await client.getChats();
@@ -337,11 +342,30 @@ async function promptUserForMultiplier() {
 
     client.on('auth_failure', msg => {
         logger.error(`Authentication failure: ${msg}`);
+        console.log('Erro de autenticação. Verifique se o QR code foi escaneado corretamente.');
     });
 
     client.on('disconnected', reason => {
         logger.error(`Client disconnected: ${reason}`);
+        console.log('Cliente desconectado. Tentando reconectar...');
     });
 
-    client.initialize();
+    // Tratamento de erros não capturados
+    process.on('uncaughtException', (error) => {
+        logger.error(`Uncaught Exception: ${error.message}`);
+        console.log('Erro não capturado:', error.message);
+    });
+
+    process.on('unhandledRejection', (reason, promise) => {
+        logger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
+        console.log('Promise rejeitada:', reason);
+    });
+
+    try {
+        await client.initialize();
+    } catch (error) {
+        logger.error(`Failed to initialize client: ${error.message}`);
+        console.log('Erro ao inicializar cliente:', error.message);
+        process.exit(1);
+    }
 })(); 
