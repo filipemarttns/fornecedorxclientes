@@ -249,33 +249,63 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
 
             for (let i = 0; i < lines.length; i++) {
                 let line = lines[i];
-                const priceRegex = /(R\$)\s*(\d+([.,]\d{1,2})?)/i;
+                
+                // Verificar se a linha contém "Atacado" (aceitar apenas linhas com Atacado)
+                const hasAtacado = /atacado/gi.test(line);
+                const hasVarejo = /varejo/gi.test(line);
+                
+                // Se tem "Varejo" mas não tem "Atacado", manter linha vazia para preservar espaçamento
+                if (hasVarejo && !hasAtacado) {
+                    processedLines.push(''); // Linha vazia para manter estrutura
+                    continue;
+                }
+                
+                // Primeiro, remover "Atacado" da linha ANTES de processar preços
+                if (hasAtacado) {
+                    line = line.replace(/\s*-?\s*Atacado\s*:?\s*/gi, '').trim();
+                }
+                
+                // Aceitar R$, $, $$ em qualquer posição da linha (antes ou depois do número)
+                // Regex melhorada para capturar preços mesmo quando há dois pontos antes
+                const priceRegex = /:?\s*(R\$|\$\$?)\s*(\d+([.,]\d{1,2})?)|(\d+([.,]\d{1,2})?)\s*(R\$|\$\$?)/i;
                 const match = line.match(priceRegex);
 
-                if (match) {
+                if (match && hasAtacado) { // Só processar preços se tinha "Atacado" na linha original
                     const fullMatch = match[0];
-                    const currencySymbol = match[1];
-                    let priceString = match[2].replace(',', '.');
+                    // Determinar se o símbolo está antes ou depois do número
+                    const currencySymbol = match[1] || match[5]; // R$, $, $$ (antes) ou $, R$, $$ (depois)
+                    let priceString = (match[2] || match[4]).replace(',', '.'); // número (antes) ou número (depois)
                     const originalPrice = parseFloat(priceString);
 
-                    if (!isNaN(originalPrice)) {
+                    if (!isNaN(originalPrice) && originalPrice > 0) {
                         if (!firstRFoundInMessage) {
                             // Use the chosen multiplier here
                             const multipliedPrice = (originalPrice * GLOBAL_PRICE_MULTIPLIER).toFixed(2).replace('.', ',');
-                            line = line.replace(fullMatch, `${currencySymbol}${multipliedPrice}`);
+                            // Sempre usar R$ no padrão final, independente do símbolo original
+                            line = line.replace(fullMatch, `R$${multipliedPrice}`);
                             firstRFoundInMessage = true;
                         } else {
-                            const indexOfR = line.indexOf(currencySymbol);
-                            if (indexOfR !== -1) {
-                                line = line.substring(0, indexOfR).trim();
-                            }
+                            // Para linhas subsequentes, remover qualquer símbolo de moeda
+                            line = line.replace(/(R\$|\$\$?)/gi, '').trim();
                         }
                     }
+                } else if (hasAtacado && !match) {
+                    // Se tinha "Atacado" mas não encontrou preço válido, pular esta linha
+                    processedLines.push(''); // Linha vazia para manter estrutura
+                    continue;
                 }
+                
                 processedLines.push(line);
             }
 
-            modifiedBody = processedLines.map(line => line.replace(/\s*-\s*Atacado|\s*Atacado/gi, '').trim()).join('\n');
+            // Preservar espaçamento original - não remover linhas vazias
+            modifiedBody = processedLines.join('\n');
+            
+            // Limpar múltiplas linhas vazias consecutivas (máximo 2 linhas vazias seguidas)
+            modifiedBody = modifiedBody.replace(/\n\s*\n\s*\n+/g, '\n\n');
+            
+            // Remover linhas vazias no início e fim
+            modifiedBody = modifiedBody.replace(/^\s*\n+/, '').replace(/\n\s*$/, '');
         }
 
         if (message.hasMedia) {
