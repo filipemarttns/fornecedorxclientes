@@ -39,7 +39,7 @@ const MEDIA_SEND_DELAY_MS = parseInt(process.env.MEDIA_SEND_DELAY_MS || "20000",
 const LOG_PATH = process.env.LOG_PATH || './wh_relay.log';
 const HEADLESS = process.env.HEADLESS === 'true' || process.env.HEADLESS === true; // Usar .env para controlar headless
 
-let GLOBAL_PRICE_MULTIPLIER = parseInt(process.env.GLOBAL_PRICE_MULTIPLIER) || 3; // Usar .env ou default 3
+let GLOBAL_PRICE_MULTIPLIER = parseFloat(process.env.GLOBAL_PRICE_MULTIPLIER) || 3; // Usar .env ou default 3, suporta decimais
 
 // Normalização e listas de filtro (escopo global)
 function normalize(str) {
@@ -194,14 +194,15 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
         // --- END NEW LOGIC ---
 
         // Only process incoming messages from the identified Announcement Groups
-        if (!sourceGroupIds.includes(message.from) || message.fromMe) {
+        // Ignorar apenas mensagens enviadas por você mesmo; validação de origem será feita após obter o chat
+        if (message.fromMe) {
             return;
         }
 
         const chat = await message.getChat();
         // Ensure the message comes from one of the explicitly monitored Announcement Groups
         if (!chat.isGroup || !sourceGroupIds.includes(chat.id._serialized)) {
-            logger.warn(`Mensagem ignorada de chat que não é um Grupo de Avisos monitorado: ${chat.name}`);
+            // Silenciosamente ignore mensagens que não são de grupos monitorados
             return;
         }
 
@@ -243,7 +244,6 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
 
         // Process text for R$ and Atacado rules
         if (modifiedBody) {
-            let firstRFoundInMessage = false;
             const lines = modifiedBody.split(/\r?\n/);
             const processedLines = [];
 
@@ -265,35 +265,41 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
                     line = line.replace(/\s*-?\s*Atacado\s*:?\s*/gi, '').trim();
                 }
                 
-                // Aceitar R$, $, $$ em qualquer posição da linha (antes ou depois do número)
-                // Regex melhorada para capturar preços mesmo quando há dois pontos antes
-                const priceRegex = /:?\s*(R\$|\$\$?)\s*(\d+([.,]\d{1,2})?)|(\d+([.,]\d{1,2})?)\s*(R\$|\$\$?)/i;
-                const match = line.match(priceRegex);
-
-                if (match && hasAtacado) { // Só processar preços se tinha "Atacado" na linha original
-                    const fullMatch = match[0];
-                    // Determinar se o símbolo está antes ou depois do número
-                    const currencySymbol = match[1] || match[5]; // R$, $, $$ (antes) ou $, R$, $$ (depois)
-                    let priceString = (match[2] || match[4]).replace(',', '.'); // número (antes) ou número (depois)
+                // Regex expandida para capturar múltiplos formatos de preço:
+                // Com símbolo antes: R$ 90,00 | R$90,00 | R$90 | $90,00 | $90 | $$90,00 | $$90
+                // Com símbolo depois: 90,00$$ | 90$$ | 90,00$ | 90$
+                // Sem símbolo: 90,00 | 90.00 (apenas com 2 decimais)
+                const priceRegex = /(?::?\s*)?(R\$|\$\$?)\s*(\d+(?:[.,]\d{2})?)|\b(\d+(?:[.,]\d{2})?)\s*(R\$|\$\$?)|\b(\d+[.,]\d{2})\b/gi;
+                
+                // Processar TODOS os preços na linha usando replace com função callback
+                line = line.replace(priceRegex, (fullMatch, symbolBefore, priceBefore, priceAfter, symbolAfter, priceAlone) => {
+                    // Determinar qual grupo capturou o número
+                    let priceString;
+                    if (priceBefore) {
+                        // Símbolo antes do número: R$90 ou $90
+                        priceString = priceBefore;
+                    } else if (priceAfter) {
+                        // Número com símbolo depois: 90,00$ ou 90$$
+                        priceString = priceAfter;
+                    } else if (priceAlone) {
+                        // Número sem símbolo: 90,00 ou 90.00
+                        priceString = priceAlone;
+                    }
+                    
+                    if (!priceString) return fullMatch; // Se não conseguiu extrair, manter original
+                    
+                    priceString = priceString.replace(',', '.'); // Normalizar para ponto decimal
                     const originalPrice = parseFloat(priceString);
 
                     if (!isNaN(originalPrice) && originalPrice > 0) {
-                        if (!firstRFoundInMessage) {
-                            // Use the chosen multiplier here
-                            const multipliedPrice = (originalPrice * GLOBAL_PRICE_MULTIPLIER).toFixed(2).replace('.', ',');
-                            // Sempre usar R$ no padrão final, independente do símbolo original
-                            line = line.replace(fullMatch, `R$${multipliedPrice}`);
-                            firstRFoundInMessage = true;
-                        } else {
-                            // Para linhas subsequentes, remover qualquer símbolo de moeda
-                            line = line.replace(/(R\$|\$\$?)/gi, '').trim();
-                        }
+                        // Multiplicar CADA preço encontrado
+                        const multipliedPrice = (originalPrice * GLOBAL_PRICE_MULTIPLIER).toFixed(2).replace('.', ',');
+                        // Sempre usar R$ no padrão final, independente do símbolo original
+                        return `R$${multipliedPrice}`;
                     }
-                } else if (hasAtacado && !match) {
-                    // Se tinha "Atacado" mas não encontrou preço válido, pular esta linha
-                    processedLines.push(''); // Linha vazia para manter estrutura
-                    continue;
-                }
+                    
+                    return fullMatch; // Se não for válido, manter original
+                });
                 
                 processedLines.push(line);
             }
