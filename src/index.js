@@ -1,12 +1,9 @@
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const pino = require('pino');
-const path = require('path');
 const fs = require('fs');
-const { execSync } = require('child_process');
-require('dotenv').config(); // Load environment variables from .env file
+require('dotenv').config();
 
-// Função para encontrar o Chrome no sistema
 function findChromePath() {
     const possiblePaths = [
         'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -24,24 +21,19 @@ function findChromePath() {
     return undefined;
 }
 
-// Configuration
 const SOURCE_COMMUNITY_NAMES = (process.env.SOURCE_COMMUNITY_NAMES || "").split(',').map(name => name.trim()).filter(n => n);
-// Permite lista explícita de canais de anúncio (separados por vírgula)
 const ANNOUNCEMENT_GROUP_NAMES = (process.env.ANNOUNCEMENT_GROUP_NAMES || process.env.ANNOUNCEMENT_GROUP_NAME || "")
   .split(',')
   .map(name => name.trim())
   .filter(n => n);
-// Nome padrão para o canal da comunidade (comportamento típico do WhatsApp): "Avisos"
 const ANNOUNCEMENT_GROUP_NAME = process.env.ANNOUNCEMENT_GROUP_NAME || "Avisos";
 const TARGET_GROUP_NAME = process.env.TARGET_GROUP_NAME || "OJ® Streetwear Shop & Sneakers";
 const DEDUPE_WINDOW_SECONDS = parseInt(process.env.DEDUPE_WINDOW_SECONDS || "10", 10);
-const MEDIA_SEND_DELAY_MS = parseInt(process.env.MEDIA_SEND_DELAY_MS || "20000", 10); // Reintroduced and set default to 20 seconds
+const MEDIA_SEND_DELAY_MS = parseInt(process.env.MEDIA_SEND_DELAY_MS || "20000", 10);
 const LOG_PATH = process.env.LOG_PATH || './wh_relay.log';
-const HEADLESS = process.env.HEADLESS === 'true' || process.env.HEADLESS === true; // Usar .env para controlar headless
+const HEADLESS = process.env.HEADLESS === 'true' || process.env.HEADLESS === true;
+const GLOBAL_PRICE_MULTIPLIER = parseFloat(process.env.GLOBAL_PRICE_MULTIPLIER) || 3;
 
-let GLOBAL_PRICE_MULTIPLIER = parseFloat(process.env.GLOBAL_PRICE_MULTIPLIER) || 3; // Usar .env ou default 3, suporta decimais
-
-// Normalização e listas de filtro (escopo global)
 function normalize(str) {
     return (str || '').toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '');
 }
@@ -52,35 +44,29 @@ const announcementWanted = (ANNOUNCEMENT_GROUP_NAMES.length > 0
     : [ANNOUNCEMENT_GROUP_NAME]
 ).map(normalize).concat(defaultAnnouncementNames);
 
-// Initialize logger
 const logger = pino(
   {
     level: 'debug',
-    base: null, // Don't log hostname/pid
+    base: null,
   },
   pino.destination({
     dest: LOG_PATH,
-    sync: false, // Asynchronous logging
+    sync: false,
   })
 );
 
-// Função removida - agora usa apenas o .env
-
 (async () => {
     logger.info('Starting WhatsApp Forwarder Bot...');
-    
-    // Usar sempre o valor do .env (não fazer pergunta)
     console.log(`[DEBUG] Multiplicador de preço configurado: ${GLOBAL_PRICE_MULTIPLIER}`);
 
-    logger.info(`Source Communities: "${SOURCE_COMMUNITY_NAMES.join(', ')}"`); // Log communities
-    logger.info(`Announcement Group Name: "${ANNOUNCEMENT_GROUP_NAME}"`); // Log announcement group name
+    logger.info(`Source Communities: "${SOURCE_COMMUNITY_NAMES.join(', ')}"`);
+    logger.info(`Announcement Group Name: "${ANNOUNCEMENT_GROUP_NAME}"`);
     logger.info(`Target Group: "${TARGET_GROUP_NAME}"`);
     logger.info(`Dedupe Window: ${DEDUPE_WINDOW_SECONDS} seconds`);
     logger.info(`Media Send Delay: ${MEDIA_SEND_DELAY_MS} milliseconds`);
     logger.info(`Log Path: "${LOG_PATH}"`);
     logger.info(`Headless Mode: ${HEADLESS}`);
 
-    // Encontrar o Chrome no sistema
     const chromePath = findChromePath();
     if (chromePath) {
         console.log(`[DEBUG] Chrome encontrado em: ${chromePath}`);
@@ -93,15 +79,15 @@ const logger = pino(
         puppeteer: {
             headless: HEADLESS,
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-            executablePath: chromePath || undefined, // Usar Chrome do sistema se disponível
+            executablePath: chromePath || undefined,
         }
     });
 
-    let sourceGroups = []; // Changed to an array of announcement groups
-    let sourceGroupIds = []; // New array to store IDs of announcement groups
+    let sourceGroups = [];
+    let sourceGroupIds = [];
     let targetGroup;
-    let isReadyToProcessMessages = false; // Flag para indicar que o bot está pronto para processar mensagens
-    const forwardedMessages = new Map(); // Map to store forwarded message hashes/IDs and their timestamps
+    let isReadyToProcessMessages = false;
+    const forwardedMessages = new Map();
 
     client.on('qr', (qr) => {
         console.log('\n=== QR CODE PARA AUTENTICAÇÃO ===');
@@ -117,19 +103,11 @@ const logger = pino(
 
         const chats = await client.getChats();
 
-        // Log all group names found for debugging
         const groupNamesFound = chats.filter(chat => chat.isGroup).map(chat => chat.name);
         logger.info(`[DEBUG] Todos os nomes de grupos encontrados no WhatsApp: [${groupNamesFound.join(', ')}]`);
 
-        // Detailed log of all chats found (for community debugging)
-        const allChatsDetails = chats.map(chat => JSON.parse(JSON.stringify(chat))); // Deep copy to get all properties
+        const allChatsDetails = chats.map(chat => JSON.parse(JSON.stringify(chat)));
         logger.debug(`[DEBUG] Detalhes completos de TODOS os chats encontrados: ${JSON.stringify(allChatsDetails, null, 2)}`);
-
-        // --- NEW LOGIC (revisado): Encontrar Canais de Aviso ---
-        // Regras:
-        // 1) Se ANNOUNCEMENT_GROUP_NAMES estiver definido, casar por igualdade OU "contém" (case-insensitive)
-        // 2) Caso contrário, usar SOURCE_COMMUNITY_NAMES como filtro por "contém" (case-insensitive) nos nomes dos canais com announce=true
-        // 3) Se nada for definido, monitorar TODOS os canais com announce=true (com aviso no log)
 
         const announcedChats = chats.filter(chat => chat.isGroup && chat.groupMetadata && chat.groupMetadata.announce === true);
         logger.info(`[ANNOUNCE] Canais com announce=true encontrados: [${announcedChats.map(c => c.name).join(', ')}]`);
@@ -145,7 +123,6 @@ const logger = pino(
                 return accepted;
             });
         } else {
-            // Fallback: monitora todos os canais de anúncio encontrados
             sourceGroups = announcedChats;
             logger.warn('Nenhum filtro de nomes fornecido. Monitorando TODOS os canais de anúncio encontrados.');
         }
@@ -161,7 +138,6 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
             process.exit(1);
         }
 
-        // Find the target group (remains the same)
         targetGroup = chats.find(chat => chat.isGroup && chat.name === TARGET_GROUP_NAME);
         logger.debug(`[DEBUG] Grupo de destino encontrado: ${targetGroup ? `${targetGroup.name} (${targetGroup.id._serialized})` : 'Nenhum'}`);
 
@@ -173,11 +149,10 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
         logger.info(`Monitorando Canais de Aviso: "${sourceGroups.map(g => g.name).join(', ')}"`);
         logger.info(`Encaminhando para o grupo: "${targetGroup.name} (${targetGroup.id._serialized})"`);
 
-        isReadyToProcessMessages = true; // Bot está pronto para processar mensagens
+        isReadyToProcessMessages = true;
     });
 
     client.on('message', async (message) => {
-        // Ensure the bot is ready to process messages
         if (!isReadyToProcessMessages) {
             logger.warn('Ignorando mensagem: Bot ainda não está pronto para processar.');
             return;
@@ -185,43 +160,35 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
 
         logger.debug(`[DEBUG] Mensagem recebida. Tipo: ${message.type}, De: ${message.from}, Corpo: ${message.body.substring(0, 50)}...`);
 
-        // --- NEW LOGIC: Filter messages based on keywords ---
         const messageBodyLower = message.body.toLowerCase();
         if (messageBodyLower.includes('bom dia')) {
             logger.info(`[FILTRO] Mensagem ignorada devido se de bom dia: "${message.body.substring(0, 50)}..."`);
             return;
         }
-        // --- END NEW LOGIC ---
 
-        // Only process incoming messages from the identified Announcement Groups
-        // Ignorar apenas mensagens enviadas por você mesmo; validação de origem será feita após obter o chat
         if (message.fromMe) {
             return;
         }
 
         const chat = await message.getChat();
-        // Ensure the message comes from one of the explicitly monitored Announcement Groups
         if (!chat.isGroup || !sourceGroupIds.includes(chat.id._serialized)) {
-            // Silenciosamente ignore mensagens que não são de grupos monitorados
             return;
         }
 
-        // Get the actual source group name for logging
         const actualSourceGroupName = chat.name;
 
         logger.info({
             timestamp: new Date().toISOString(),
             source_message_id: message.id.id,
             author: message.author || message.from,
-            source_group: actualSourceGroupName, // Use actual group name here
+            source_group: actualSourceGroupName,
             original_text: message.body,
             media_filenames: [],
             status: 'received',
             error_message: null,
         }, 'Nova mensagem recebida de um Grupo de Avisos monitorado.');
 
-        // Deduplication check
-        const messageIdentifier = message.id.id || `${message.body}-${message.hasMedia}`; // Fallback for ID
+        const messageIdentifier = message.id.id || `${message.body}-${message.hasMedia}`;
         if (forwardedMessages.has(messageIdentifier)) {
             const lastForwardTime = forwardedMessages.get(messageIdentifier);
             if ((Date.now() - lastForwardTime) / 1000 < DEDUPE_WINDOW_SECONDS) {
@@ -229,7 +196,7 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
                     timestamp: new Date().toISOString(),
                     source_message_id: message.id.id,
                     author: message.author || message.from,
-                    source_group: actualSourceGroupName, // Use actual group name here
+                    source_group: actualSourceGroupName,
                     original_text: message.body,
                     media_filenames: [],
                     status: 'skipped',
@@ -242,7 +209,6 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
         let mediaFilenames = [];
         let modifiedBody = message.body;
 
-        // Process text for R$ and Atacado rules
         if (modifiedBody) {
             const lines = modifiedBody.split(/\r?\n/);
             const processedLines = [];
@@ -250,67 +216,48 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
             for (let i = 0; i < lines.length; i++) {
                 let line = lines[i];
                 
-                // Verificar se a linha contém "Atacado" (aceitar apenas linhas com Atacado)
                 const hasAtacado = /atacado/gi.test(line);
                 const hasVarejo = /varejo/gi.test(line);
                 
-                // Se tem "Varejo" mas não tem "Atacado", manter linha vazia para preservar espaçamento
                 if (hasVarejo && !hasAtacado) {
-                    processedLines.push(''); // Linha vazia para manter estrutura
+                    processedLines.push('');
                     continue;
                 }
                 
-                // Primeiro, remover "Atacado" da linha ANTES de processar preços
                 if (hasAtacado) {
                     line = line.replace(/\s*-?\s*Atacado\s*:?\s*/gi, '').trim();
                 }
                 
-                // Regex expandida para capturar múltiplos formatos de preço:
-                // Com símbolo antes: R$ 90,00 | R$90,00 | R$90 | $90,00 | $90 | $$90,00 | $$90
-                // Com símbolo depois: 90,00$$ | 90$$ | 90,00$ | 90$
-                // Sem símbolo: 90,00 | 90.00 (apenas com 2 decimais)
                 const priceRegex = /(?::?\s*)?(R\$|\$\$?)\s*(\d+(?:[.,]\d{2})?)|\b(\d+(?:[.,]\d{2})?)\s*(R\$|\$\$?)|\b(\d+[.,]\d{2})\b/gi;
                 
-                // Processar TODOS os preços na linha usando replace com função callback
                 line = line.replace(priceRegex, (fullMatch, symbolBefore, priceBefore, priceAfter, symbolAfter, priceAlone) => {
-                    // Determinar qual grupo capturou o número
                     let priceString;
                     if (priceBefore) {
-                        // Símbolo antes do número: R$90 ou $90
                         priceString = priceBefore;
                     } else if (priceAfter) {
-                        // Número com símbolo depois: 90,00$ ou 90$$
                         priceString = priceAfter;
                     } else if (priceAlone) {
-                        // Número sem símbolo: 90,00 ou 90.00
                         priceString = priceAlone;
                     }
                     
-                    if (!priceString) return fullMatch; // Se não conseguiu extrair, manter original
+                    if (!priceString) return fullMatch;
                     
-                    priceString = priceString.replace(',', '.'); // Normalizar para ponto decimal
+                    priceString = priceString.replace(',', '.');
                     const originalPrice = parseFloat(priceString);
 
                     if (!isNaN(originalPrice) && originalPrice > 0) {
-                        // Multiplicar CADA preço encontrado
                         const multipliedPrice = (originalPrice * GLOBAL_PRICE_MULTIPLIER).toFixed(2).replace('.', ',');
-                        // Sempre usar R$ no padrão final, independente do símbolo original
                         return `R$${multipliedPrice}`;
                     }
                     
-                    return fullMatch; // Se não for válido, manter original
+                    return fullMatch;
                 });
                 
                 processedLines.push(line);
             }
 
-            // Preservar espaçamento original - não remover linhas vazias
             modifiedBody = processedLines.join('\n');
-            
-            // Limpar múltiplas linhas vazias consecutivas (máximo 2 linhas vazias seguidas)
             modifiedBody = modifiedBody.replace(/\n\s*\n\s*\n+/g, '\n\n');
-            
-            // Remover linhas vazias no início e fim
             modifiedBody = modifiedBody.replace(/^\s*\n+/, '').replace(/\n\s*$/, '');
         }
 
@@ -329,7 +276,7 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
                         timestamp: new Date().toISOString(),
                         source_message_id: message.id.id,
                         mimetype: media.mimetype,
-                        data_length: media.data.length, // Log data length to confirm content
+                        data_length: media.data.length,
                         status: 'media_downloaded',
                     }, 'Media downloaded successfully. Attempting to send...');
 
@@ -337,7 +284,6 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
                     const filename = `media-${message.id.id}.${extension}`;
                     const mediaToSend = new MessageMedia(media.mimetype, media.data, filename);
                     
-                    // Send media FIRST, without caption, and without any delay
                     logger.info({ timestamp: new Date().toISOString(), source_message_id: message.id.id, status: 'attempting_send_media_only' }, 'Attempting to send media message only.');
                     console.log(`[DEBUG] Media send STARTED (no delay) for message ${message.id.id}.`);
                     await client.sendMessage(targetGroup.id._serialized, mediaToSend);
@@ -346,12 +292,11 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
                     mediaFilenames.push(filename);
                     logger.info(`Media forwarded: ${filename}`);
                     
-                    // If there's text, apply delay and send as a separate message
-                    if (modifiedBody && modifiedBody.trim() !== '') { // Ensure there's actual content after processing
+                    if (modifiedBody && modifiedBody.trim() !== '') {
                         logger.info(`Applying ${MEDIA_SEND_DELAY_MS}ms delay before sending text message.`);
-                        console.log(`[DEBUG] TEXT DELAY STARTED (${MEDIA_SEND_DELAY_MS}ms) for message ${message.id.id}.`); // Explicit console log
+                        console.log(`[DEBUG] TEXT DELAY STARTED (${MEDIA_SEND_DELAY_MS}ms) for message ${message.id.id}.`);
                         await new Promise(resolve => setTimeout(resolve, MEDIA_SEND_DELAY_MS));
-                        console.log(`[DEBUG] TEXT DELAY COMPLETED for message ${message.id.id}. Sending text now.`); // Explicit console log
+                        console.log(`[DEBUG] TEXT DELAY COMPLETED for message ${message.id.id}. Sending text now.`);
                         await client.sendMessage(targetGroup.id._serialized, modifiedBody);
                         logger.info('Text message sent after media.');
                     }
@@ -368,19 +313,19 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
                     timestamp: new Date().toISOString(),
                     source_message_id: message.id.id,
                     author: message.author || message.from,
-                    source_group: actualSourceGroupName, // Use actual group name here
+                    source_group: actualSourceGroupName,
                     original_text: message.body,
                     media_filenames: [],
                     status: 'error',
                     error_message: `Failed to download or send media: ${mediaError.message}`,
                 }, 'Error handling media.');
             }
-        } else if (modifiedBody && modifiedBody.trim() !== '') { // Only send text if no media was detected and there's actual modifiedBody
+        } else if (modifiedBody && modifiedBody.trim() !== '') {
             try {
                 logger.info({ timestamp: new Date().toISOString(), source_message_id: message.id.id, status: 'attempting_send_text_only' }, 'Attempting to send text-only message.');
-                console.log(`[DEBUG] TEXT DELAY STARTED (${MEDIA_SEND_DELAY_MS}ms) for message ${message.id.id}. (Text Only)`); // Explicit console log for text-only
+                console.log(`[DEBUG] TEXT DELAY STARTED (${MEDIA_SEND_DELAY_MS}ms) for message ${message.id.id}. (Text Only)`);
                 await new Promise(resolve => setTimeout(resolve, MEDIA_SEND_DELAY_MS));
-                console.log(`[DEBUG] TEXT DELAY COMPLETED for message ${message.id.id}. Sending text now. (Text Only)`); // Explicit console log for text-only
+                console.log(`[DEBUG] TEXT DELAY COMPLETED for message ${message.id.id}. Sending text now. (Text Only)`);
                 await client.sendMessage(targetGroup.id._serialized, modifiedBody);
                 logger.info('Text message (possibly modified) forwarded.');
             } catch (textError) {
@@ -388,9 +333,9 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
                     timestamp: new Date().toISOString(),
                     source_message_id: message.id.id,
                     author: message.author || message.from,
-                    source_group: actualSourceGroupName, // Use actual group name here
+                    source_group: actualSourceGroupName,
                     original_text: message.body,
-                    modified_text: modifiedBody, // Log modified text too
+                    modified_text: modifiedBody,
                     media_filenames: mediaFilenames,
                     status: 'error',
                     error_message: `Failed to send text message: ${textError.message}`,
@@ -404,7 +349,7 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
             timestamp: new Date().toISOString(),
             source_message_id: message.id.id,
             author: message.author || message.from,
-            source_group: actualSourceGroupName, // Use actual group name here
+            source_group: actualSourceGroupName,
             target_group: targetGroup.name,
             original_text: message.body,
             media_filenames: mediaFilenames,
@@ -423,7 +368,6 @@ Verifique os nomes no WhatsApp, inclusive acentuação e variações, ou deixe v
         console.log('Cliente desconectado. Tentando reconectar...');
     });
 
-    // Tratamento de erros não capturados
     process.on('uncaughtException', (error) => {
         logger.error(`Uncaught Exception: ${error.message}`);
         console.log('Erro não capturado:', error.message);
